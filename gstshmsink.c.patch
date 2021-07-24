@@ -1,0 +1,16 @@
+--- gstshmsink.c	2021-07-24 16:28:50.327141542 +0200
++++ tmp.c	2021-07-24 16:28:43.215076413 +0200
+@@ -716,6 +716,13 @@
+   }
+ 
+   if (need_new_memory) {
++    GST_WARNING_OBJECT(self, "No free shared memory blocks, skip input buffer");
++    GST_OBJECT_UNLOCK(self);
++    return GST_FLOW_OK;
++
++    // TODO currently it can't allocate more memory then initial size, so next
++    // code don't work properly: instead of allocation new memory we have
++    // hanging in a while loop
+     if (gst_buffer_get_size (buf) > sp_writer_get_max_buf_size (self->pipe)) {
+       gsize area_size = sp_writer_get_max_buf_size (self->pipe);
+       GST_ELEMENT_ERROR (self, RESOURCE, NO_SPACE_LEFT, (NULL),

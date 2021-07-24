@@ -1,0 +1,241 @@
+diff -Naru shm/gstshmsink.c shm/gstshmsink.c
+--- shm/gstshmsink.c	2021-07-24 20:55:54.593118848 +0200
++++ shm/gstshmsink.c	2021-07-24 20:55:49.489069979 +0200
+@@ -669,6 +669,7 @@
+   GstMemory *memory = NULL;
+   GstBuffer *sendbuf = NULL;
+   gsize written_bytes;
++  struct BufMetaInfo meta;
+ 
+   GST_OBJECT_LOCK (self);
+   if (self->unlock) {
+@@ -788,7 +789,10 @@
+    * We know it's not mapped for writing anywhere as we just mapped it for
+    * reading
+    */
+-  rv = sp_writer_send_buf (self->pipe, (char *) map.data, map.size, sendbuf);
++  meta.pts = GST_BUFFER_PTS(buf); 
++  meta.dts = GST_BUFFER_DTS(buf);
++  meta.duration = GST_BUFFER_DURATION(buf);
++  rv = sp_writer_send_buf (self->pipe, (char *) map.data, map.size, sendbuf, meta);
+   if (rv == -1) {
+     GST_ELEMENT_ERROR (self, STREAM, FAILED,
+         (NULL), ("Failed to send data over SHM"));
+diff -Naru shm/gstshmsrc.c shm/gstshmsrc.c
+--- shm/gstshmsrc.c	2021-07-24 20:55:54.593118848 +0200
++++ shm/gstshmsrc.c	2021-07-24 20:55:49.489069979 +0200
+@@ -56,9 +56,15 @@
+   PROP_0,
+   PROP_SOCKET_PATH,
+   PROP_IS_LIVE,
+-  PROP_SHM_AREA_NAME
++  PROP_SHM_AREA_NAME,
++  PROP_DO_TIMESTAMP
+ };
+ 
++#define DEFAULT_DO_TIMESTAMP (FALSE)
++#define SHM_TIMESTAMP_CAPS_NAME "timestamp/x-shm-stream"
++GstStaticCaps timestamp_ref_caps = GST_STATIC_CAPS(SHM_TIMESTAMP_CAPS_NAME);
++
++
+ struct GstShmBuffer
+ {
+   char *buf;
+@@ -136,6 +142,13 @@
+           "The name of the shared memory area used to get buffers",
+           NULL, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
+ 
++  g_object_class_install_property (gobject_class, PROP_DO_TIMESTAMP,
++      g_param_spec_boolean ("do-timestamp",
++          "Produce " SHM_TIMESTAMP_CAPS_NAME " in nanoseconds",
++          "If buffer on producer side daesn't have PTS, system time will be used",
++          DEFAULT_DO_TIMESTAMP,
++          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++
+   gst_element_class_add_static_pad_template (gstelement_class, &srctemplate);
+ 
+   gst_element_class_set_static_metadata (gstelement_class,
+@@ -151,6 +164,7 @@
+ gst_shm_src_init (GstShmSrc * self)
+ {
+   self->poll = gst_poll_new (TRUE);
++  self->do_timestamp = DEFAULT_DO_TIMESTAMP;
+   gst_poll_fd_init (&self->pollfd);
+ }
+ 
+@@ -188,6 +202,11 @@
+       gst_base_src_set_live (GST_BASE_SRC (object),
+           g_value_get_boolean (value));
+       break;
++    case PROP_DO_TIMESTAMP:
++      GST_OBJECT_LOCK (object);
++      self->do_timestamp = g_value_get_boolean (value);
++      GST_OBJECT_UNLOCK (object);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -215,6 +234,11 @@
+         g_value_set_string (value, sp_get_shm_area_name (self->pipe->pipe));
+       GST_OBJECT_UNLOCK (object);
+       break;
++    case PROP_DO_TIMESTAMP:
++      GST_OBJECT_LOCK (object);
++      g_value_set_boolean (value, self->do_timestamp);
++      GST_OBJECT_UNLOCK (object);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -326,6 +350,8 @@
+   gchar *buf = NULL;
+   int rv = 0;
+   struct GstShmBuffer *gsb;
++  struct BufMetaInfo meta;
++  gboolean do_timestamp;
+ 
+   GST_DEBUG_OBJECT (self, "Stopping %p", self);
+ 
+@@ -337,6 +363,7 @@
+   } else {
+     pipe->use_count++;
+   }
++  do_timestamp = self->do_timestamp;
+   GST_OBJECT_UNLOCK (self);
+ 
+   do {
+@@ -367,7 +394,7 @@
+       buf = NULL;
+       GST_LOG_OBJECT (self, "Reading from pipe");
+       GST_OBJECT_LOCK (self);
+-      rv = sp_client_recv (pipe->pipe, &buf);
++      rv = sp_client_recv (pipe->pipe, &buf, &meta);
+       GST_OBJECT_UNLOCK (self);
+       if (rv < 0) {
+         GST_ELEMENT_ERROR (self, RESOURCE, READ, ("Failed to read from shmsrc"),
+@@ -386,6 +413,17 @@
+   *outbuf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
+       buf, rv, 0, rv, gsb, free_buffer);
+ 
++  if (do_timestamp) {
++    if (meta.pts == GST_CLOCK_TIME_NONE) {
++      struct timespec ts;
++      timespec_get(&ts, TIME_UTC);
++      meta.pts = ts.tv_sec * 1000000000 + ts.tv_nsec;
++    }
++
++    gst_buffer_add_reference_timestamp_meta (*outbuf,
++        gst_static_caps_get(&timestamp_ref_caps), meta.pts, meta.duration);
++  }
++
+   return GST_FLOW_OK;
+ 
+ error:
+diff -Naru shm/gstshmsrc.h shm/gstshmsrc.h
+--- shm/gstshmsrc.h	2021-07-24 20:55:54.593118848 +0200
++++ shm/gstshmsrc.h	2021-07-24 20:55:49.489069979 +0200
+@@ -48,6 +48,7 @@
+   GstPushSrc element;
+ 
+   gchar *socket_path;
++  gboolean do_timestamp;
+ 
+   GstShmPipe *pipe;
+   GstPoll *poll;
+diff -Naru shm/shmpipe.c shm/shmpipe.c
+--- shm/shmpipe.c	2021-07-24 20:55:54.593118848 +0200
++++ shm/shmpipe.c	2021-07-24 20:55:49.489069979 +0200
+@@ -63,6 +63,9 @@
+  * type 3: shm buffer
+  * offset
+  * bufsize
++ * pts
++ * dts
++ * duration
+  *
+  * type 4: ack buffer
+  * offset
+@@ -174,6 +177,9 @@
+     {
+       unsigned long offset;
+       unsigned long size;
++      unsigned long pts;
++      unsigned long dts;
++      unsigned long duration;
+     } buffer;
+     struct
+     {
+@@ -576,7 +582,7 @@
+ /* Returns the number of client this has successfully been sent to */
+ 
+ int
+-sp_writer_send_buf (ShmPipe * self, char *buf, size_t size, void *tag)
++sp_writer_send_buf (ShmPipe * self, char *buf, size_t size, void *tag, struct BufMetaInfo meta)
+ {
+   ShmArea *area = NULL;
+   unsigned long offset = 0;
+@@ -617,6 +623,9 @@
+     struct CommandBuffer cb = { 0 };
+     cb.payload.buffer.offset = offset;
+     cb.payload.buffer.size = bsize;
++    cb.payload.buffer.pts = meta.pts;
++    cb.payload.buffer.dts = meta.dts;
++    cb.payload.buffer.duration = meta.duration;
+     if (!send_command (client->fd, &cb, COMMAND_NEW_BUFFER, self->shm_area->id))
+       continue;
+     sb->clients[i++] = client->fd;
+@@ -653,7 +662,7 @@
+ }
+ 
+ long int
+-sp_client_recv (ShmPipe * self, char **buf)
++sp_client_recv (ShmPipe * self, char **buf, struct BufMetaInfo *meta)
+ {
+   char *area_name = NULL;
+   ShmArea *newarea;
+@@ -704,6 +713,11 @@
+         if (area->id == cb.area_id) {
+           *buf = area->shm_area_buf + cb.payload.buffer.offset;
+           sp_shm_area_inc (area);
++          if (meta) {
++            meta->pts = cb.payload.buffer.pts;
++            meta->dts = cb.payload.buffer.dts;
++            meta->duration = cb.payload.buffer.duration;
++          }
+           return cb.payload.buffer.size;
+         }
+       }
+diff -Naru shm/shmpipe.h shm/shmpipe.h
+--- shm/shmpipe.h	2021-07-24 20:55:54.593118848 +0200
++++ shm/shmpipe.h	2021-07-24 20:55:49.489069979 +0200
+@@ -78,6 +78,12 @@
+ typedef struct _ShmBlock ShmBlock;
+ typedef struct _ShmBuffer ShmBuffer;
+ 
++struct BufMetaInfo {
++  unsigned long pts;
++  unsigned long dts;
++  unsigned long duration;
++};
++
+ typedef void (*sp_buffer_free_callback) (void * tag, void * user_data);
+ 
+ ShmPipe *sp_writer_create (const char *path, size_t size, mode_t perms);
+@@ -96,7 +102,7 @@
+ 
+ ShmBlock *sp_writer_alloc_block (ShmPipe * self, size_t size);
+ void sp_writer_free_block (ShmBlock *block);
+-int sp_writer_send_buf (ShmPipe * self, char *buf, size_t size, void * tag);
++int sp_writer_send_buf (ShmPipe * self, char *buf, size_t size, void * tag, struct BufMetaInfo meta);
+ char *sp_writer_block_get_buf (ShmBlock *block);
+ ShmPipe *sp_writer_block_get_pipe (ShmBlock *block);
+ size_t sp_writer_get_max_buf_size (ShmPipe * self);
+@@ -113,7 +119,7 @@
+ void *sp_writer_buf_get_tag (ShmBuffer * buffer);
+ 
+ ShmPipe *sp_client_open (const char *path);
+-long int sp_client_recv (ShmPipe * self, char **buf);
++long int sp_client_recv (ShmPipe * self, char **buf, struct BufMetaInfo *meta);
+ int sp_client_recv_finish (ShmPipe * self, char *buf);
+ void sp_client_close (ShmPipe * self);
+ 

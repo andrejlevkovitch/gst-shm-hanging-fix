@@ -73,3 +73,22 @@ each second!
 
 I just skip buffers if shm memory have no free memory blocks for allocating
 buffer in shared memory space
+
+
+## shm timestamps
+
+Adding timestams for shmsrc:
+
+```bash
+cd gst-plugins-bad/sys
+patch -s -p0 < ../../shm_do_timestamp.patch
+```
+
+After that just add `do-timestamp=true` for shmsrc. You can check that timestamps
+was added by using `identity silent=FALSE` and gst-launch with vlag `-v`. In
+this case you will see that buffers have `GstReferenceTimestampMeta`
+
+NOTE: this timestamps can't be used by `timeoverlay`, but you can get in c-code
+by [gst_buffer_get_reference_timestamp_meta](https://gstreamer.freedesktop.org/documentation/gstreamer/gstbuffer.html?gi-language=c#gst_buffer_get_reference_timestamp_meta)
+with `timestamp/x-shm-stream` caps (in nanoseconds). If shmsink push buffers without PTS, then
+shmsrc will use system time (utc)

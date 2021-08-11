@@ -1,9 +1,9 @@
---- gstshmsink.c	2021-08-03 18:59:05.526901916 +0200
-+++ gstshmsink.c	2021-08-03 18:58:52.654850848 +0200
-@@ -709,6 +709,13 @@
-     memory = gst_buffer_peek_memory (buf, 0);
- 
-     if (memory->allocator != GST_ALLOCATOR (self->allocator)) {
+--- gstshmsink.c	2021-08-11 17:37:39.278034450 +0200
++++ tmp	2021-08-11 17:37:36.200360162 +0200
+@@ -728,6 +728,13 @@
+     while ((memory =
+             gst_shm_sink_allocator_alloc_locked (self->allocator,
+                 gst_buffer_get_size (buf), &self->params)) == NULL) {
 +      GST_WARNING_OBJECT(self, "No free shared memory blocks, skip input buffer");
 +      GST_OBJECT_UNLOCK(self);
 +      return GST_FLOW_OK;
@@ -11,6 +11,6 @@
 +      // TODO currently it can't allocate more memory then initial size, so next
 +      // code don't work properly: instead of allocation new memory we have
 +      // hanging in a while loop
-       need_new_memory = TRUE;
-       GST_LOG_OBJECT (self, "Memory in buffer %p was not allocated by "
-           "%" GST_PTR_FORMAT ", will memcpy", buf, memory->allocator);
+       g_cond_wait (&self->cond, GST_OBJECT_GET_LOCK (self));
+       if (self->unlock) {
+         GST_OBJECT_UNLOCK (self);

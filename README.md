@@ -21,10 +21,12 @@ cd gst-plugins-bad
 git checkout $(gst-launch-1.0 --version | head -n 1 | awk '{print $3;}')
 ```
 
-3. apply patch for [gstshmsink.c](gst-plugins-bad/sys/shm/gstshmsink.c)
+3. apply patch for [gst shm](gst-plugins-bad/sys/shm)
 
 ```bash
-patch gst-plugins-bad/sys/shm/gstshmsink.c gstshmsink.c.patch
+cd gst-plugins-bad/sys
+patch -s -p0 < ../../gst-sys-shm.patch
+cd ../../
 ```
 
 4. build shm plugin

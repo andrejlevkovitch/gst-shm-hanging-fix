@@ -1,0 +1,122 @@
+diff -Naru shm/gstshmsink.c /tmp/shm/gstshmsink.c
+--- shm/gstshmsink.c	2022-05-18 10:46:50.626109463 +0200
++++ /tmp/shm/gstshmsink.c	2022-05-18 10:46:39.854027577 +0200
+@@ -41,6 +41,7 @@
+ #include <gst/gst.h>
+ 
+ #include <string.h>
++#include <gst/video/video-info.h>
+ 
+ /* signals */
+ enum
+@@ -309,10 +310,9 @@
+   GST_OBJECT_UNLOCK (self->sink);
+ 
+   if (!memory) {
+-    memory = gst_allocator_alloc (NULL, size, params);
+-    GST_LOG_OBJECT (self,
++    GST_ERROR_OBJECT (self,
+         "Not enough shared memory for GstMemory of %" G_GSIZE_FORMAT
+-        "bytes, allocating using standard allocator", size);
++        "bytes", size);
+   }
+ 
+   return memory;
+@@ -1002,10 +1002,71 @@
+ gst_shm_sink_propose_allocation (GstBaseSink * sink, GstQuery * query)
+ {
+   GstShmSink *self = GST_SHM_SINK (sink);
++  GstCaps *caps = NULL;
++  gboolean need_pool = FALSE;
++  guint pool_count = 0;
++  guint buffer_size = 0;
++  guint min_buffers = 0;
++  guint max_buffers = 0;
++  guint buffer_size_tmp = 0;
++  guint min_buffers_tmp = 0;
++  guint max_buffers_tmp = 0;
++  GstVideoInfo video_info;
+ 
+-  if (self->allocator)
+-    gst_query_add_allocation_param (query, GST_ALLOCATOR (self->allocator),
+-        NULL);
++  gst_query_parse_allocation (query, &caps, &need_pool);
++
++  if (caps == NULL) {
++    GST_ERROR_OBJECT (self, "Allocation query doesn't contain caps");
++    return FALSE;
++  }
++
++  if (self->allocator && need_pool) {
++    pool_count = gst_query_get_n_allocation_pools (query);
++
++    // find maximal values of buffer pools
++    for (int i = 0; i < pool_count; i++) {
++      gst_query_parse_nth_allocation_pool (query, i, NULL, &buffer_size_tmp, &min_buffers_tmp, &max_buffers_tmp);
++      if (buffer_size_tmp > buffer_size) {
++        buffer_size = buffer_size_tmp;
++      }
++      if (min_buffers_tmp > min_buffers) {
++        min_buffers = min_buffers_tmp;
++      }
++      if (max_buffers_tmp > max_buffers) {
++        max_buffers = max_buffers_tmp;
++      }
++    }
++
++    if (buffer_size == 0 && gst_video_info_from_caps(&video_info, caps)) {
++      buffer_size = video_info.size;
++    }
++
++    if (buffer_size != 0) {
++      GST_OBJECT_LOCK (self);
++      max_buffers_tmp = self->size / buffer_size;
++      GST_OBJECT_UNLOCK (self);
++
++      if (max_buffers_tmp < max_buffers) {
++        GST_ERROR_OBJECT (self, "Can not allocate enough buffers: %u required", max_buffers);
++        return FALSE;
++      }
++      max_buffers = max_buffers_tmp;
++      
++      // remove current buffer pools
++      for (int i = pool_count - 1; i >= 0; i--) {
++        GST_DEBUG_OBJECT (self, "Remove allocation pool by index: %i", i);
++        gst_query_remove_nth_allocation_pool (query, i);
++      }
++
++      GST_DEBUG_OBJECT (self, "Add allocation pool: size %u, min %u, max %u", buffer_size, min_buffers, max_buffers);
++
++      // set buffer pool + shm allocator
++      gst_query_add_allocation_param (query, GST_ALLOCATOR (self->allocator), NULL);
++      gst_query_add_allocation_pool (query, NULL, buffer_size, min_buffers, max_buffers);
++    } else {
++      GST_WARNING_OBJECT (self, "Can not calculate buffer size for buffer pool, skip buffer pool creation, it can hurt perfomance!!!");
++    }
++  }
+ 
+   return TRUE;
+ }
+diff -Naru shm/Makefile.am /tmp/shm/Makefile.am
+--- shm/Makefile.am	2022-05-18 10:46:50.626109463 +0200
++++ /tmp/shm/Makefile.am	2022-05-18 10:46:39.854027577 +0200
+@@ -3,6 +3,6 @@
+ libgstshm_la_SOURCES = shmpipe.c shmalloc.c gstshm.c gstshmsrc.c gstshmsink.c
+ libgstshm_la_CFLAGS = $(GST_PLUGINS_BAD_CFLAGS) $(GST_CFLAGS) -DSHM_PIPE_USE_GLIB
+ libgstshm_la_LDFLAGS = $(GST_PLUGIN_LDFLAGS)
+-libgstshm_la_LIBADD = $(GST_LIBS) $(GST_BASE_LIBS) $(SHM_LIBS)
++libgstshm_la_LIBADD = $(GST_LIBS) $(GST_BASE_LIBS) $(SHM_LIBS) -lgstvideo-$(GST_API_VERSION)
+ 
+ noinst_HEADERS = gstshmsrc.h gstshmsink.h shmpipe.h  shmalloc.h
+diff -Naru shm/meson.build /tmp/shm/meson.build
+--- shm/meson.build	2022-05-18 10:46:50.626109463 +0200
++++ /tmp/shm/meson.build	2022-05-18 10:46:39.846027516 +0200
+@@ -24,7 +24,7 @@
+     shm_sources,
+     c_args : gst_plugins_bad_args + ['-DSHM_PIPE_USE_GLIB'],
+     include_directories : [configinc],
+-    dependencies : shm_deps,
++    dependencies : [shm_deps, gstvideo_dep],
+     install : true,
+     install_dir : plugins_install_dir,
+   )

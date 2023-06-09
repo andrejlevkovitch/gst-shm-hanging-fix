@@ -1,6 +1,8 @@
 #!/bin/bash
 # reproduces bug (hangind) with shmsrc/shmsink
 
+DROP_SHM_BUFFER_POOL=${DROP_SHM_BUFFER_POOL:-0}
+
 sock=/tmp/shm-sock
 
 set -e
@@ -33,18 +35,22 @@ export GST_DEBUG=2
 #export GST_DEBUG=shmsink:5
 #export GST_DEBUG=shmsrc:5
 
-# space for 3 buffers (NOTE: because shm requires additional allignment it will
-# be able allocate only 2 buffers)
+# NOTE: because shm requires additional allignment it will be able allocate N - 1 buffers
+n_buffers=12
 width=640
 height=480
-fps=1
+fps=30
 pixel_size=4
-shm_size=$(echo "3 * $width * $height * $pixel_size" | bc)
+shm_size=$(echo "$n_buffers * $width * $height * $pixel_size" | bc)
 
 caps="video/x-raw, format=BGRx, width=$width, height=$height, framerate=$fps/1"
 
 echo "start producer"
-gst-launch-1.0 videotestsrc ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
+if [ "$DROP_SHM_BUFFER_POOL" -eq 0 ]; then
+  gst-launch-1.0 videotestsrc ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
+else
+  gst-launch-1.0 videotestsrc ! tee ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
+fi
 producer_pid=$!
 
 sleep 1

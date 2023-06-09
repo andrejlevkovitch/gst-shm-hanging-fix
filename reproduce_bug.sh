@@ -1,7 +1,8 @@
 #!/bin/bash
 # reproduces bug (hangind) with shmsrc/shmsink
 
-DROP_SHM_BUFFER_POOL=${DROP_SHM_BUFFER_POOL:-0}
+DROP_SHM_BUFFER_POOL=${DROP_SHM_BUFFER_POOL:-FALSE}
+LEAKY_SHMSINK=${LEAKY_SHMSINK:-FALSE}
 
 sock=/tmp/shm-sock
 
@@ -46,11 +47,7 @@ shm_size=$(echo "$n_buffers * $width * $height * $pixel_size" | bc)
 caps="video/x-raw, format=BGRx, width=$width, height=$height, framerate=$fps/1"
 
 echo "start producer"
-if [ "$DROP_SHM_BUFFER_POOL" -eq 0 ]; then
-  gst-launch-1.0 videotestsrc ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
-else
-  gst-launch-1.0 videotestsrc ! tee ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
-fi
+gst-launch-1.0 videotestsrc ! identity drop-allocation=${DROP_SHM_BUFFER_POOL} ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false leaky=${LEAKY_SHMSINK} &
 producer_pid=$!
 
 sleep 1

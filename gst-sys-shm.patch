@@ -1,6 +1,6 @@
 diff -Naru shm/gstshmsink.c /tmp/shm/gstshmsink.c
---- shm/gstshmsink.c	2023-06-09 10:10:18.282401109 +0200
-+++ /tmp/shm/gstshmsink.c	2023-06-09 10:10:05.774300662 +0200
+--- shm/gstshmsink.c	2023-06-09 12:29:11.295287493 +0200
++++ /tmp/shm/gstshmsink.c	2023-06-09 12:28:35.914895213 +0200
 @@ -41,6 +41,7 @@
  #include <gst/gst.h>
  
@@ -9,7 +9,25 @@ diff -Naru shm/gstshmsink.c /tmp/shm/gstshmsink.c
  
  /* signals */
  enum
-@@ -309,10 +310,9 @@
+@@ -58,7 +59,8 @@
+   PROP_PERMS,
+   PROP_SHM_SIZE,
+   PROP_WAIT_FOR_CONNECTION,
+-  PROP_BUFFER_TIME
++  PROP_BUFFER_TIME,
++  PROP_LEAKY
+ };
+ 
+ struct GstShmClient
+@@ -71,6 +73,7 @@
+ #define DEFAULT_WAIT_FOR_CONNECTION (TRUE)
+ /* Default is user read/write, group read */
+ #define DEFAULT_PERMS ( S_IRUSR | S_IWUSR | S_IRGRP )
++#define DEFAULT_LEAKY (FALSE)
+ 
+ 
+ GST_DEBUG_CATEGORY_STATIC (shmsink_debug);
+@@ -309,10 +312,9 @@
    GST_OBJECT_UNLOCK (self->sink);
  
    if (!memory) {
@@ -22,56 +40,72 @@ diff -Naru shm/gstshmsink.c /tmp/shm/gstshmsink.c
    }
  
    return memory;
-@@ -725,20 +725,6 @@
-       goto error;
-     }
+@@ -417,6 +419,15 @@
+           -1, G_MAXINT64, -1,
+           G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
  
--    while ((memory =
--            gst_shm_sink_allocator_alloc_locked (self->allocator,
--                gst_buffer_get_size (buf), &self->params)) == NULL) {
--      g_cond_wait (&self->cond, GST_OBJECT_GET_LOCK (self));
--      if (self->unlock) {
--        GST_OBJECT_UNLOCK (self);
--        ret = gst_base_sink_wait_preroll (bsink);
--        if (ret == GST_FLOW_OK)
--          GST_OBJECT_LOCK (self);
--        else
--          return ret;
--      }
--    }
--
-     while (self->wait_for_connection && !self->clients) {
++  g_object_class_install_property (gobject_class, PROP_LEAKY,
++      g_param_spec_boolean ("leaky",
++          "If TRUE, then shmsink will drop any buffers that are pushed into it "
++          "once there are no available shm memory",
++          "If TRUE, then shmsink will drop any buffers that are pushed into it "
++          "once there are no available shm memory",
++          DEFAULT_LEAKY,
++          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++
+   signals[SIGNAL_CLIENT_CONNECTED] = g_signal_new ("client-connected",
+       GST_TYPE_SHM_SINK, G_SIGNAL_RUN_LAST, 0, NULL, NULL,
+       g_cclosure_marshal_VOID__INT, G_TYPE_NONE, 1, G_TYPE_INT);
+@@ -505,6 +516,11 @@
+       GST_OBJECT_UNLOCK (object);
+       g_cond_broadcast (&self->cond);
+       break;
++    case PROP_LEAKY:
++      GST_OBJECT_LOCK (object);
++      self->leaky = g_value_get_boolean (value);
++      GST_OBJECT_UNLOCK (object);
++      g_cond_broadcast (&self->cond);
+     default:
+       break;
+   }
+@@ -534,6 +550,9 @@
+     case PROP_BUFFER_TIME:
+       g_value_set_int64 (value, self->buffer_time);
+       break;
++    case PROP_LEAKY:
++      g_value_set_boolean (value, self->leaky);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -728,6 +747,12 @@
+     while ((memory =
+             gst_shm_sink_allocator_alloc_locked (self->allocator,
+                 gst_buffer_get_size (buf), &self->params)) == NULL) {
++      if (self->leaky) {
++        GST_DEBUG_OBJECT (self, "No shared memory available, skip buffer");
++        GST_OBJECT_UNLOCK (self);
++        return GST_FLOW_OK;
++      }
++
        g_cond_wait (&self->cond, GST_OBJECT_GET_LOCK (self));
        if (self->unlock) {
-@@ -747,12 +733,26 @@
-         if (ret == GST_FLOW_OK) {
-           GST_OBJECT_LOCK (self);
-         } else {
--          gst_memory_unref (memory);
-           return ret;
-         }
+         GST_OBJECT_UNLOCK (self);
+@@ -753,6 +778,13 @@
        }
      }
  
 +    if (!self->clients) {
 +      GST_DEBUG_OBJECT (self, "No clients connected, skip buffer");
 +      GST_OBJECT_UNLOCK (self);
-+      return GST_FLOW_OK;
-+    }
-+
-+    memory = gst_shm_sink_allocator_alloc_locked (self->allocator,
-+        gst_buffer_get_size (buf), &self->params);
-+
-+    if (memory == NULL) {
-+      GST_WARNING_OBJECT (self, "No free shared memory blocks, skip input buffer");
-+      GST_OBJECT_UNLOCK (self);
++      gst_memory_unref (memory);
 +      return GST_FLOW_OK;
 +    }
 +
      if (!gst_memory_map (memory, &map, GST_MAP_WRITE)) {
        GST_ELEMENT_ERROR (self, STREAM, FAILED,
            (NULL), ("Failed to map memory"));
-@@ -1002,10 +1002,112 @@
+@@ -1002,10 +1034,112 @@
  gst_shm_sink_propose_allocation (GstBaseSink * sink, GstQuery * query)
  {
    GstShmSink *self = GST_SHM_SINK (sink);
@@ -187,9 +221,20 @@ diff -Naru shm/gstshmsink.c /tmp/shm/gstshmsink.c
  
    return TRUE;
  }
+diff -Naru shm/gstshmsink.h /tmp/shm/gstshmsink.h
+--- shm/gstshmsink.h	2023-06-09 12:29:11.295287493 +0200
++++ /tmp/shm/gstshmsink.h	2023-06-09 12:28:35.914895213 +0200
+@@ -59,6 +59,7 @@
+   GstPoll *poll;
+   GstPollFD serverpollfd;
+ 
++  gboolean leaky;
+   gboolean wait_for_connection;
+   gboolean stop;
+   gboolean unlock;
 diff -Naru shm/Makefile.am /tmp/shm/Makefile.am
---- shm/Makefile.am	2023-06-09 10:10:18.282401109 +0200
-+++ /tmp/shm/Makefile.am	2023-06-09 10:10:05.774300662 +0200
+--- shm/Makefile.am	2023-06-09 12:29:11.291287449 +0200
++++ /tmp/shm/Makefile.am	2023-06-09 12:28:35.910895168 +0200
 @@ -3,6 +3,6 @@
  libgstshm_la_SOURCES = shmpipe.c shmalloc.c gstshm.c gstshmsrc.c gstshmsink.c
  libgstshm_la_CFLAGS = $(GST_PLUGINS_BAD_CFLAGS) $(GST_CFLAGS) -DSHM_PIPE_USE_GLIB
@@ -199,8 +244,8 @@ diff -Naru shm/Makefile.am /tmp/shm/Makefile.am
  
  noinst_HEADERS = gstshmsrc.h gstshmsink.h shmpipe.h  shmalloc.h
 diff -Naru shm/meson.build /tmp/shm/meson.build
---- shm/meson.build	2023-06-09 10:10:18.286401141 +0200
-+++ /tmp/shm/meson.build	2023-06-09 10:10:05.774300662 +0200
+--- shm/meson.build	2023-06-09 12:29:11.295287493 +0200
++++ /tmp/shm/meson.build	2023-06-09 12:28:35.910895168 +0200
 @@ -24,7 +24,7 @@
      shm_sources,
      c_args : gst_plugins_bad_args + ['-DSHM_PIPE_USE_GLIB'],

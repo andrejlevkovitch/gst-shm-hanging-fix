@@ -27,7 +27,7 @@ at_exit() {
 trap at_exit EXIT
 
 
-if [ -f $sock ]; then
+if [ -e $sock ]; then
   rm $sock
 fi
 

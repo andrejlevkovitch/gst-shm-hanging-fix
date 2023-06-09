@@ -243,6 +243,57 @@ diff -Naru shm/Makefile.am /tmp/shm/Makefile.am
 +libgstshm_la_LIBADD = $(GST_LIBS) $(GST_BASE_LIBS) $(SHM_LIBS) -lgstvideo-$(GST_API_VERSION)
  
  noinst_HEADERS = gstshmsrc.h gstshmsink.h shmpipe.h  shmalloc.h
+diff -Naru shm/shmpipe.c /tmp/shm/shmpipe.c
+--- shm/shmpipe.c	2023-06-09 18:06:34.601281724 +0200
++++ /tmp/shm/shmpipe.c	2023-06-09 18:06:30.405264750 +0200
+@@ -721,6 +721,7 @@
+ {
+   ShmBuffer *buf = NULL, *prev_buf = NULL;
+   struct CommandBuffer cb;
++  int i = 0;
+ 
+   if (!recv_command (client->fd, &cb))
+     return -1;
+@@ -731,7 +732,36 @@
+       for (buf = self->buffers; buf; buf = buf->next) {
+         if (buf->shm_area->id == cb.area_id &&
+             buf->offset == cb.payload.ack_buffer.offset) {
+-          return sp_shmbuf_dec (self, buf, prev_buf, client, tag);
++          // XXX in case if shm allocator is used in buffer pools we can have
++          // situation, when some element (like videorate) before shmsink
++          // produces duplicated buffers. If that duplicates are just
++          // references, then they share same memory segment, so area_id is
++          // identical for both shm buffers. As result: shmsink pushes two
++          // identical shm buffers into that queue and client also will report
++          // about using same memory segment twice. In case when there are
++          // two clients, one client can report about using both shm buffers
++          // (original and duplicate) before second client will report about
++          // using first shm buffer:
++          //
++          // send buffer ->
++          // send buffer duplicate ->
++          // first client receives buffer ->
++          // first client receives duplicate ->
++          // second client receives buffer ->
++          // second client receives duplicate ->
++          // first client report that buffer is not needed anymore ->
++          // first found buffer in registered buffers is decremented, but not
++          // removed, because there is second client that still requires it ->
++          // first client report that duplicate is not needed anymore ->
++          // now first found buffer in registered buffers isn't assigned to
++          // first client anymore, only to second client, so we should ignore
++          // that buffer and go forward in the queue and search for duplicate
++
++          for (i = 0; i < buf->num_clients; i++) {
++            if (buf->clients[i] == client->fd) {
++              return sp_shmbuf_dec (self, buf, prev_buf, client, tag);
++            }
++          }
+         }
+         prev_buf = buf;
+       }
+ 
+ noinst_HEADERS = gstshmsrc.h gstshmsink.h shmpipe.h  shmalloc.h
 diff -Naru shm/meson.build /tmp/shm/meson.build
 --- shm/meson.build	2023-06-09 12:29:11.295287493 +0200
 +++ /tmp/shm/meson.build	2023-06-09 12:28:35.910895168 +0200

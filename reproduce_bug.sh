@@ -33,8 +33,8 @@ fi
 
 export GST_PLUGIN_PATH=$(pwd)/gst-plugins-bad/sys/shm
 export GST_DEBUG=2
-#export GST_DEBUG=shmsink:5
-#export GST_DEBUG=shmsrc:5
+#export GST_DEBUG=2,shmsink:5
+#export GST_DEBUG=2,shmsrc:5
 
 # NOTE: because shm requires additional allignment it will be able allocate N - 1 buffers
 n_buffers=12

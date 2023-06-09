@@ -30,13 +30,21 @@ fi
 
 export GST_PLUGIN_PATH=$(pwd)/gst-plugins-bad/sys/shm
 export GST_DEBUG=2
-#export GST_DEBUG=shmsrc:7,shmsink:7
+#export GST_DEBUG=shmsink:5
+#export GST_DEBUG=shmsrc:5
 
-# space for 10 buffers (12Mb)
-shm_size=$(echo "12 * 1024 * 1024" | bc)
+# space for 3 buffers (NOTE: because shm requires additional allignment it will
+# be able allocate only 2 buffers)
+width=640
+height=480
+fps=1
+pixel_size=4
+shm_size=$(echo "3 * $width * $height * $pixel_size" | bc)
+
+caps="video/x-raw, format=BGRx, width=$width, height=$height, framerate=$fps/1"
 
 echo "start producer"
-gst-launch-1.0 videotestsrc ! video/x-raw, format=BGRx, width=640, height=480, framerate=30/1 ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
+gst-launch-1.0 videotestsrc ! $caps ! shmsink socket-path=$sock shm-size=$shm_size wait-for-connection=false &
 producer_pid=$!
 
 sleep 1
@@ -44,5 +52,5 @@ sleep 1
 echo "start consumer"
 # hanging happens when shared memory allocator can't allocate more blocks in
 # shared memory, so for bug reproducing I just add delay (0.5s)
-gst-launch-1.0 shmsrc socket-path=$sock ! identity sleep-time=50000 ! video/x-raw, format=BGRx, width=640, height=480, framerate=30/1 ! ximagesink
+gst-launch-1.0 shmsrc socket-path=$sock ! identity sleep-time=50000 ! $caps ! ximagesink
 consumer_pid=$!
